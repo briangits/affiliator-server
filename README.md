@@ -1,0 +1,2 @@
+# affiliator-backend
+# affiliator-server

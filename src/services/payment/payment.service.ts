@@ -9,7 +9,9 @@ type PaymentCheck = {
     lastCheck: number
 }
 
-const PaymentCheckCache = cache.createKey<PaymentCheck, [reference: string]>('payment-check')
+const PaymentCheckCache = cache.createKey<PaymentCheck, [reference: string]>('payment-check', {
+    ttl: 60
+})
 
 export class PaymentService extends Service<PaymentEvents> {
     private payments: Payments
@@ -120,7 +122,7 @@ export class PaymentService extends Service<PaymentEvents> {
     async checkPayment(reference: string): Promise<Result> {
         const ongoingCheck = await cache.get(PaymentCheckCache(reference))
         if (ongoingCheck) {
-            if (!(ongoingCheck.lastCheck < Date.now() / 1000 - 30)) {
+            if (!(ongoingCheck.lastCheck < Date.now() / 1000 - 10)) {
                 return Result.ok()
             }
 

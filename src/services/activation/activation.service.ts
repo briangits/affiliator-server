@@ -1,6 +1,6 @@
 import { ClientStatus } from '../../domains/client'
-import { ActivationRequest } from './activation.types'
-import { Activations } from '../../domains/activation'
+import { ActivationRequest, ActivationState } from './activation.types'
+import { Activations, ActivationStatus } from '../../domains/activation'
 import { PaymentService } from '../payment'
 import { PaymentStatus, PaymentType } from '../../shared/types/payment'
 import { ActivationSettings } from './activation.settings'
@@ -10,8 +10,8 @@ import { cache } from '../../cache'
 import { ClientManagementService } from '../clients'
 import { UserManagementService } from '../users'
 
-const ActivationStatusCache = cache.createKey<ClientStatus, [clientId: number]>(
-    'client-activation-status',
+const ActivationStatusCache = cache.createKey<ActivationState, [clientId: number]>(
+    'client-activation-state',
     {
         ttl: 60 * 10
     }
@@ -21,7 +21,7 @@ export class ActivationService extends Service<ActivationEvents> {
     private activations: Activations
     private users: UserManagementService
     private clients: ClientManagementService
-    private paymentService: PaymentService
+    private payments: PaymentService
 
     constructor(
         events: ActivationEvents,
@@ -35,9 +35,9 @@ export class ActivationService extends Service<ActivationEvents> {
         this.activations = activations
         this.users = users
         this.clients = clients
-        this.paymentService = paymentService
+        this.payments = paymentService
 
-        this.paymentService.events.onStatusChange(async ({ reference, status }) => {
+        this.payments.events.onStatusChange(async ({ reference, status }) => {
             await this.handlePaymentResult({ reference, status })
         })
     }
@@ -46,12 +46,25 @@ export class ActivationService extends Service<ActivationEvents> {
         return await ActivationSettings.activationFee.get()
     }
 
-    async getClientStatus(clientId: number): Promise<ClientStatus> {
+    async getStatus(clientId: number): Promise<ActivationState> {
         return await cache.getOrElse(ActivationStatusCache(clientId), async () => {
             const client = await this.clients.getClient(clientId)
             if (!client) throw error('ClientNotFound', `client(id: ${clientId}) not found`)
 
-            return client.status
+            if (client.status === ClientStatus.Active) return ActivationState.Completed
+
+            const pendingActivations = await this.activations.getAll({
+                clientId,
+                status: ActivationStatus.Pending
+            })
+            if (pendingActivations.length <= 0) return ActivationState.NoneInProgress
+
+            pendingActivations.forEach(activation => {
+                if (!activation.paymentRef) return
+                this.payments.checkPayment(activation.paymentRef)
+            })
+
+            return ActivationState.InProgress
         })
     }
 
@@ -71,7 +84,7 @@ export class ActivationService extends Service<ActivationEvents> {
 
             const activationFee = await ActivationSettings.activationFee.get()
 
-            const [payment, error] = await this.paymentService.initiatePayment({
+            const [payment, error] = await this.payments.initiatePayment({
                 type: PaymentType.Charge,
                 phoneNumber: request.phoneNumber,
                 amount: activationFee,
@@ -88,6 +101,8 @@ export class ActivationService extends Service<ActivationEvents> {
 
             if (error) {
                 // TODO: Report incident
+                await this.activations.markAsFailed(activation.id)
+
                 return Result.error('PaymentFailed')
             }
 
@@ -110,6 +125,8 @@ export class ActivationService extends Service<ActivationEvents> {
             case PaymentStatus.Cancelled:
             case PaymentStatus.Failed:
                 await this.activations.markAsFailed(activation.id)
+                await cache.clear(ActivationStatusCache(activation.clientId))
+
                 return Result.ok()
             case PaymentStatus.Completed:
                 await this.activations.markAsCompleted(activation.id)
@@ -118,7 +135,10 @@ export class ActivationService extends Service<ActivationEvents> {
                     status: ClientStatus.Active
                 })
 
-                await cache.set(ActivationStatusCache(activation.clientId), ClientStatus.Active)
+                await cache.set(
+                    ActivationStatusCache(activation.clientId),
+                    ActivationState.Completed
+                )
                 this.events.emit('clientActivated', activation.clientId)
 
                 return Result.ok()

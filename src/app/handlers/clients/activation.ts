@@ -18,7 +18,7 @@ router.get('/fee', async (req, res) => {
 })
 
 router.get('/status', ClientAuth, async (req, res) => {
-    const status = await service.getClientStatus(req.client.id)
+    const status = await service.getStatus(req.client.id)
 
     return res.send({ status })
 })

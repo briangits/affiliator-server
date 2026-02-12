@@ -1,8 +1,15 @@
 import { Payments } from '../../domains/payment'
 import { Service } from '../service'
-import { GatewayPaymentRequest, PaymentGateway } from './gateway'
+import { GatewayPayment, GatewayPaymentRequest, PaymentGateway } from './gateway'
 import { PaymentEvents } from './payment.events'
 import { Payment, PaymentRequest, PaymentStatus, PaymentType } from './payment.types'
+import { cache } from '../../cache'
+
+type PaymentCheck = {
+    lastCheck: number
+}
+
+const PaymentCheckCache = cache.createKey<PaymentCheck, [reference: string]>('payment-check')
 
 export class PaymentService extends Service<PaymentEvents> {
     private payments: Payments
@@ -13,6 +20,14 @@ export class PaymentService extends Service<PaymentEvents> {
 
         this.payments = payments
         this.gateway = gateway
+
+        setInterval(async () => {
+            this.payments.getAll({ status: PaymentStatus.Pending }).then(pendingPayments => {
+                pendingPayments.forEach(payment => {
+                    this.checkPayment(payment.reference)
+                })
+            })
+        }, 1000 * 30)
     }
 
     async initiatePayment(request: PaymentRequest): Promise<Result<Payment>> {
@@ -47,14 +62,7 @@ export class PaymentService extends Service<PaymentEvents> {
         return Result.ok(payment)
     }
 
-    async processCallback(data: any): Promise<Result> {
-        const [gatewayPayment, error] = await this.gateway.processCallback(data)
-
-        if (error) {
-            // TODO: Report incident
-            return Result.error('CallbackProcessingFailed')
-        }
-
+    private async processPaymentResult(gatewayPayment: GatewayPayment): Promise<Result> {
         const { reference, status } = gatewayPayment
 
         const payment = await this.payments.getByReference(reference)
@@ -107,5 +115,49 @@ export class PaymentService extends Service<PaymentEvents> {
             console.error(error)
             return Result.error('CallbackProcessingFailed')
         }
+    }
+
+    async checkPayment(reference: string): Promise<Result> {
+        const ongoingCheck = await cache.get(PaymentCheckCache(reference))
+        if (ongoingCheck) {
+            if (!(ongoingCheck.lastCheck < Date.now() / 1000 - 30)) {
+                return Result.ok()
+            }
+
+            await cache.clear(PaymentCheckCache(reference))
+        }
+
+        await cache.set(PaymentCheckCache(reference), {
+            lastCheck: Date.now() / 1000
+        })
+
+        const payment = await this.payments.getByReference(reference)
+        if (!payment) return Result.error('UnknownPayment')
+
+        const terminalStates = [
+            PaymentStatus.Cancelled,
+            PaymentStatus.Failed,
+            PaymentStatus.Completed
+        ]
+        if (terminalStates.includes(payment.status)) return Result.ok()
+
+        const [gatewayPayment, error] = await this.gateway.getPayment(reference)
+        if (error || !gatewayPayment) {
+            // TODO: Log incident
+            return Result.error('ErrorFetchingPaymentDetails')
+        }
+
+        return await this.processPaymentResult(gatewayPayment)
+    }
+
+    async processCallback(data: any): Promise<Result> {
+        const [gatewayPayment, error] = await this.gateway.processCallback(data)
+
+        if (error) {
+            // TODO: Report incident
+            return Result.error('CallbackProcessingFailed')
+        }
+
+        return await this.processPaymentResult(gatewayPayment)
     }
 }

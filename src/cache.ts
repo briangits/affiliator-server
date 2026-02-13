@@ -1,5 +1,7 @@
 import { createClient } from 'redis'
-import { toBoolean } from './app/validators/transforms'
+
+const CACHE_ENABLED = process.env.CACHE_ENABLED === 'true'
+const NAMESPACE = process.env.CACHE_NAMESPACE || randomString(4)
 
 const redis = createClient()
 
@@ -21,7 +23,7 @@ export type CacheKey<T> = {
 }
 
 export const cache = {
-    namespace: process.env.HOST || randomString(4),
+    namespace: NAMESPACE,
     started: false,
     async start() {
         try {
@@ -32,7 +34,7 @@ export const cache = {
             console.error('Error connecting Redis', e)
         }
     },
-    enabled: true,
+    enabled: CACHE_ENABLED,
     disable() {
         this.enabled = false
     },

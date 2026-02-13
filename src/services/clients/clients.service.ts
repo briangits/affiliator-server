@@ -102,7 +102,7 @@ export class ClientManagementService extends Service {
         const client = await this.clients.getInvitor(clientId)
         if (!client || !client.invitorId) return null
 
-        return this.getClient(client.invitorId)
+        return this.getClient(client.id)
     }
 
     async getInvitees(
